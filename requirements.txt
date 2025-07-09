@@ -3,5 +3,4 @@ geopandas
 pandas 
 osmnx 
 folium 
-shapely 
-python-pptx
+shapely
