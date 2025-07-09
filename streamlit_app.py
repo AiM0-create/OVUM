@@ -7,7 +7,6 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import osmnx as ox
-import folium
 from shapely.geometry import Point
 import zipfile
 import tempfile
@@ -27,12 +26,11 @@ def load_shapefile(zip_file):
         z.extractall(tmpdir)
         for fname in z.namelist():
             if fname.endswith('.shp'):
-                shp_path = f"{tmpdir}/{fname}"
-                return gpd.read_file(shp_path)
+                selo = f"{tmpdir}/{fname}"
+                return gpd.read_file(selo)
     return None
 
 # Load clinics and generate buffers
-# @st.cache_data  # caching disabled for simplicity
 def load_clinics(csv_bytes):
     df = pd.read_csv(csv_bytes)
     gdf = gpd.GeoDataFrame(df,
@@ -40,40 +38,43 @@ def load_clinics(csv_bytes):
                            crs="EPSG:4326")
     gdf_proj = gdf.to_crs(epsg=3857)
     for meters in [3000, 5000, 6000]:
-        label = meters//1000
+        label = meters // 1000
         gdf_proj[f'buffer_{label}km'] = gdf_proj.geometry.buffer(meters)
     return gdf_proj
 
-# @st.cache_data  # caching disabled for simplicity
+# Extract spatial metrics
 def extract_osm_metrics(clinics_gdf, km_label):
     records = []
     for _, row in clinics_gdf.iterrows():
-        poly = row[f'buffer_{km_label}km'].to_crs(epsg=4326)
-        # Buildings count
-        bldgs = ox.geometries.geometries_from_polygon(poly, {'building': True})
-        # Competitors count
-        comps = ox.geometries.geometries_from_polygon(poly, {'amenity':'hospital','healthcare':'maternity'})
+        # Get metric buffer and reproject to lat/lon for OSM queries
+        poly_m = row[f'buffer_{km_label}km']
+        geo_series = gpd.GeoSeries([poly_m], crs=3857)
+        poly_ll = geo_series.to_crs(epsg=4326).iloc[0]
+        # Building count
+        bldgs = ox.geometries.geometries_from_polygon(poly_ll, {'building': True})
+        # Competitor count (maternity)
+        comps = ox.geometries.geometries_from_polygon(poly_ll, {'amenity': 'hospital', 'healthcare': 'maternity'})
         # Road density
-        G = ox.graph_from_polygon(poly, network_type='drive')
-        length_km = sum(d['length'] for _,_,d in G.edges(data=True)) / 1000
-        area_km2 = poly.to_crs(epsg=3857).area / 1e6
+        G = ox.graph_from_polygon(poly_ll, network_type='drive')
+        total_len_m = sum(d['length'] for _, _, d in G.edges(data=True))
+        length_km = total_len_m / 1000
+        area_km2 = poly_m.area / 1e6
         # Playschools count
-        schools = ox.geometries.geometries_from_polygon(poly, {'amenity':['kindergarten','school']})
+        schools = ox.geometries.geometries_from_polygon(poly_ll, {'amenity': ['kindergarten', 'school']})
         # Public transport stops count
-        pts = ox.geometries.geometries_from_polygon(poly, {'public_transport':'station'})
+        pts = ox.geometries.geometries_from_polygon(poly_ll, {'public_transport': 'station'})
         records.append({
             'clinic': row['name'],
             'radius_km': km_label,
             'buildings': len(bldgs),
             'competitors': len(comps),
-            'road_density': length_km/area_km2,
+            'road_density': length_km / area_km2,
             'playschools': len(schools),
             'public_transport': len(pts)
         })
     return pd.DataFrame(records)
 
-# Scoring function
-# @st.cache_data  # caching disabled for simplicity
+# Scoring and ranking
 def compute_scores(df):
     weights = {
         'buildings': 0.2,
@@ -83,39 +84,42 @@ def compute_scores(df):
         'public_transport': 0.2
     }
     df2 = df.copy()
-    for k, w in weights.items():
-        norm = (df2[k] - df2[k].min()) / (df2[k].max() - df2[k].min())
-        df2[f'{k}_score'] = norm * w
-    df2['total_score'] = df2[[f'{k}_score' for k in weights]].sum(axis=1)
+    for factor, w in weights.items():
+        norm = (df2[factor] - df2[factor].min()) / (df2[factor].max() - df2[factor].min())
+        df2[f'{factor}_score'] = norm * w
+    df2['total_score'] = df2[[f'{f}_score' for f in weights]].sum(axis=1)
     df2['rank'] = df2['total_score'].rank(ascending=False)
     return df2
 
 if csv_file and shp_zip:
     st.success("Data loaded successfully.")
     clinics = load_clinics(csv_file)
-    gdf_catch = load_shapefile(shp_zip)
+    catchments = load_shapefile(shp_zip)
 
-    st.subheader("Clinic Locations")
-    coords = clinics.to_crs(epsg=4326).geometry.apply(lambda p: (p.y, p.x))
-    st.map(pd.DataFrame(coords.tolist(), columns=['lat', 'lon']))
+    st.subheader("Clinic Locations on Map")
+    df_map = clinics.to_crs(epsg=4326).geometry.apply(lambda p: {'lat': p.y, 'lon': p.x})
+    st.map(pd.DataFrame(df_map.tolist()))
 
-    # Compute metrics
-    metrics = pd.concat([extract_osm_metrics(clinics, r) for r in [3,5,6]], ignore_index=True)
+    # Compute metrics for each radius
+    metrics = pd.concat([extract_osm_metrics(clinics, r) for r in [3, 5, 6]], ignore_index=True)
     scores = compute_scores(metrics)
 
     st.subheader("Catchment Metrics & Scores")
     st.dataframe(scores)
 
-    # Visualize Scores
-    st.subheader("Score Comparison by Catchment")
-    chart = scores.pivot(index='radius_km', columns='clinic', values='total_score')
-    st.line_chart(chart)
+    # Score comparison
+    st.subheader("Score Comparison by Radius & Clinic")
+    pivot = scores.pivot(index='radius_km', columns='clinic', values='total_score')
+    st.line_chart(pivot)
 
-    st.subheader("Factor Breakdown for Each Clinic")
+    # Factor breakdown
+    st.subheader("Factor Score Breakdown per Clinic")
     for clinic in scores['clinic'].unique():
-        st.markdown(f"**{clinic}**")
-        dfc = scores[scores['clinic']==clinic].set_index('radius_km')
-        st.bar_chart(dfc[[ 'buildings_score','competitors_score','road_density_score','playschools_score','public_transport_score']])
-
+        st.markdown(f"### {clinic}")
+        dfc = scores[scores['clinic'] == clinic].set_index('radius_km')
+        st.bar_chart(dfc[[
+            'buildings_score', 'competitors_score', 'road_density_score',
+            'playschools_score', 'public_transport_score'
+        ]])
 else:
-    st.info("Please upload both the clinic CSV and catchment shapefile ZIP to proceed.")
+    st.warning("Upload both clinic CSV and shapefile ZIP to view analysis.")
