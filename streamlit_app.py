@@ -40,7 +40,12 @@ if csv_file and shp_zip:
     if catchments_gdf is not None:
         catchments_gdf = catchments_gdf.to_crs(epsg=4326)
 
-        # Create a full-width Folium map with a clean basemap
+    # Compute map center as average of clinic coordinates
+    center_lat = clinics_gdf.geometry.y.mean()
+    center_lon = clinics_gdf.geometry.x.mean()
+    center = [center_lat, center_lon]
+
+    # Create a full-width Folium map with a clean basemap
     m = folium.Map(
         location=center,
         zoom_start=12,
@@ -53,7 +58,6 @@ if csv_file and shp_zip:
         # Define colors for different radius zones if attribute exists
         def style_function(feature):
             props = feature['properties']
-            # If shapefile has a 'radius_km' field, color by value
             radius = props.get('radius_km')
             if radius == 3:
                 color = '#FF5733'  # Orange-red
@@ -70,7 +74,7 @@ if csv_file and shp_zip:
             }
 
         folium.GeoJson(
-            catchments_gdf.__geo_interface__,
+            catchments_gdf,
             name="Catchments",
             style_function=style_function,
             tooltip=folium.GeoJsonTooltip(fields=['radius_km'], aliases=['Radius (km):'])
