@@ -1,5 +1,5 @@
 # Requirements:
-# 
+#
 # To install dependencies:
 # pip install streamlit geopandas pandas osmnx folium shapely
 
@@ -20,17 +20,18 @@ st.sidebar.header("Upload Data")
 csv_file = st.sidebar.file_uploader("Upload clinic CSV", type=["csv"])
 shp_zip = st.sidebar.file_uploader("Upload catchment shapefile ZIP", type=["zip"])
 
+
 def load_shapefile(zip_file):
     with tempfile.TemporaryDirectory() as tmpdir:
         z = zipfile.ZipFile(zip_file)
         z.extractall(tmpdir)
         for fname in z.namelist():
             if fname.endswith('.shp'):
-                selo = f"{tmpdir}/{fname}"
-                return gpd.read_file(selo)
+                shp_path = f"{tmpdir}/{fname}"
+                return gpd.read_file(shp_path)
     return None
 
-# Load clinics and generate buffers
+
 def load_clinics(csv_bytes):
     df = pd.read_csv(csv_bytes)
     gdf = gpd.GeoDataFrame(df,
@@ -42,27 +43,26 @@ def load_clinics(csv_bytes):
         gdf_proj[f'buffer_{label}km'] = gdf_proj.geometry.buffer(meters)
     return gdf_proj
 
-# Extract spatial metrics
+
 def extract_osm_metrics(clinics_gdf, km_label):
     records = []
     for _, row in clinics_gdf.iterrows():
-        # Get metric buffer and reproject to lat/lon for OSM queries
         poly_m = row[f'buffer_{km_label}km']
-        geo_series = gpd.GeoSeries([poly_m], crs=3857)
-        poly_ll = geo_series.to_crs(epsg=4326).iloc[0]
+        # convert to lat/lon
+        poly_ll = gpd.GeoSeries([poly_m], crs=3857).to_crs(epsg=4326).iloc[0]
         # Building count
-        bldgs = ox.geometries.geometries_from_polygon(poly_ll, {'building': True})
-        # Competitor count (maternity)
-        comps = ox.geometries.geometries_from_polygon(poly_ll, {'amenity': 'hospital', 'healthcare': 'maternity'})
+        bldgs = ox.geometries_from_polygon(poly_ll, tags={'building': True})
+        # Competitor count
+        comps = ox.geometries_from_polygon(poly_ll, tags={'amenity': 'hospital', 'healthcare': 'maternity'})
         # Road density
         G = ox.graph_from_polygon(poly_ll, network_type='drive')
-        total_len_m = sum(d['length'] for _, _, d in G.edges(data=True))
+        total_len_m = sum(data['length'] for u, v, data in G.edges(data=True))
         length_km = total_len_m / 1000
         area_km2 = poly_m.area / 1e6
         # Playschools count
-        schools = ox.geometries.geometries_from_polygon(poly_ll, {'amenity': ['kindergarten', 'school']})
+        schools = ox.geometries_from_polygon(poly_ll, tags={'amenity': ['kindergarten', 'school']})
         # Public transport stops count
-        pts = ox.geometries.geometries_from_polygon(poly_ll, {'public_transport': 'station'})
+        pts = ox.geometries_from_polygon(poly_ll, tags={'public_transport': 'station'})
         records.append({
             'clinic': row['name'],
             'radius_km': km_label,
@@ -74,7 +74,7 @@ def extract_osm_metrics(clinics_gdf, km_label):
         })
     return pd.DataFrame(records)
 
-# Scoring and ranking
+
 def compute_scores(df):
     weights = {
         'buildings': 0.2,
@@ -91,28 +91,26 @@ def compute_scores(df):
     df2['rank'] = df2['total_score'].rank(ascending=False)
     return df2
 
+
 if csv_file and shp_zip:
     st.success("Data loaded successfully.")
     clinics = load_clinics(csv_file)
     catchments = load_shapefile(shp_zip)
 
     st.subheader("Clinic Locations on Map")
-    df_map = clinics.to_crs(epsg=4326).geometry.apply(lambda p: {'lat': p.y, 'lon': p.x})
-    st.map(pd.DataFrame(df_map.tolist()))
+    coords = clinics.to_crs(epsg=4326).geometry.apply(lambda p: {'lat': p.y, 'lon': p.x})
+    st.map(pd.DataFrame(coords.tolist()))
 
-    # Compute metrics for each radius
     metrics = pd.concat([extract_osm_metrics(clinics, r) for r in [3, 5, 6]], ignore_index=True)
     scores = compute_scores(metrics)
 
     st.subheader("Catchment Metrics & Scores")
     st.dataframe(scores)
 
-    # Score comparison
     st.subheader("Score Comparison by Radius & Clinic")
     pivot = scores.pivot(index='radius_km', columns='clinic', values='total_score')
     st.line_chart(pivot)
 
-    # Factor breakdown
     st.subheader("Factor Score Breakdown per Clinic")
     for clinic in scores['clinic'].unique():
         st.markdown(f"### {clinic}")
